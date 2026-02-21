@@ -39,7 +39,7 @@ public sealed class Agent
         if (_tools.Count == 0)
             throw new InvalidOperationException("No tools were added. Use .WithTool(new FileSystemTool()) first.");
 
-        var planner = new Planner(_llm, _instructions);
+        var planner = new Planner(_llm, _instructions, _tools);
         var orchestrator = new AgentOrchestrator(planner, _tools);
 
         await orchestrator.RunAsync(new TaskDefinition

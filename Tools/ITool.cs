@@ -1,6 +1,7 @@
 namespace AgentCore.Tools;
+
 public interface ITool
 {
-    string Name { get; }
+    ToolSpec Spec { get; }
     Task<string> ExecuteAsync(string inputJson);
 }

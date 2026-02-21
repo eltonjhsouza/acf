@@ -1,17 +1,16 @@
-using AgentCore.LLM;
 using AgentCore.Tools;
-using System.Text.Json;
 
 namespace AgentCore.Core;
+
 public class AgentOrchestrator
 {
     private readonly Planner _planner;
-    private readonly Dictionary<string, ITool> _tools;
+    private readonly ToolRegistry _tools;
 
     public AgentOrchestrator(Planner planner, IEnumerable<ITool> tools)
     {
         _planner = planner;
-        _tools = tools.ToDictionary(t => t.Name);
+        _tools = new ToolRegistry(tools);
     }
 
     public async Task RunAsync(TaskDefinition task)
@@ -34,26 +33,24 @@ public class AgentOrchestrator
 
             Console.WriteLine($"Executing: {step.Description}");
 
-            // 🔐 NORMALIZAÇÃO DE TOOL
-            var toolName = step.ToolName.Trim().ToLowerInvariant();
+            var toolName = step.ToolName.Trim();
 
-            if (toolName is "write_file" or "mkdir" or "create_directory")
+            // Normalização defensiva (temporária)
+            if (toolName.Equals("write_file", StringComparison.OrdinalIgnoreCase) ||
+                toolName.Equals("mkdir", StringComparison.OrdinalIgnoreCase) ||
+                toolName.Equals("create_directory", StringComparison.OrdinalIgnoreCase))
             {
                 toolName = "filesystem";
             }
 
-            if (!_tools.TryGetValue(toolName, out var tool))
-            {
-                throw new Exception(
-                    $"Tool '{step.ToolName}' not found. Available tools: {string.Join(", ", _tools.Keys)}");
-            }
+            if (!_tools.TryGet(toolName, out var tool))
+                throw new Exception($"Tool '{step.ToolName}' not found. Available: {_tools.ListNames()}");
 
-            var inputJson = step.ToolInput.ValueKind == JsonValueKind.Undefined
+            var inputJson = step.ToolInput.ValueKind == System.Text.Json.JsonValueKind.Undefined
                 ? "{}"
                 : step.ToolInput.GetRawText();
 
             var result = await tool.ExecuteAsync(inputJson);
-
             Console.WriteLine($"Result: {result}");
 
             state.CurrentStepIndex++;

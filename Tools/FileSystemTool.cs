@@ -1,223 +1,339 @@
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Runtime.Versioning;
 
 namespace AgentCore.Tools;
-public class FileSystemTool : ITool
+
+public sealed class FileSystemTool : ITool
 {
-    public string Name => "filesystem";
+    private readonly string _root;
 
-    private readonly string _workspaceRoot;
-
-    public FileSystemTool(string? workspaceRoot = null)
+    public FileSystemTool(string rootPath)
     {
-        _workspaceRoot = workspaceRoot ?? Path.Combine(Directory.GetCurrentDirectory(), "AgentWorkspace");
-        Directory.CreateDirectory(_workspaceRoot);
+        if (string.IsNullOrWhiteSpace(rootPath))
+            throw new ArgumentException("rootPath cannot be empty.");
+
+        _root = Path.GetFullPath(rootPath);
+        Directory.CreateDirectory(_root);
     }
+
+    public ToolSpec Spec => new ToolSpec
+    {
+        Name = "filesystem",
+        Description = "Operations on files and directories (create/read/write/list/move/copy/delete) under a configured root path. Supports chmod on Linux/macOS.",
+        JsonSchema =
+            """
+            {
+              "type":"object",
+              "properties":{
+                "action":{"type":"string","enum":[
+                  "create_directory","write_file","append_file","read_file","list",
+                  "delete_file","delete_directory","move","copy","exists","chmod"
+                ]},
+                "path":{"type":"string","description":"Relative path under the configured root. If omitted for list, lists root."},
+                "to":{"type":"string","description":"Destination relative path for move/copy."},
+                "content":{"type":"string","description":"Content for write/append."},
+                "recursive":{"type":"boolean","description":"For delete_directory."},
+                "mode":{"type":"string","description":"Unix mode in octal string, e.g. 755 or 644, for chmod."}
+              },
+              "required":["action"]
+            }
+            """
+    };
 
     public async Task<string> ExecuteAsync(string inputJson)
     {
         if (string.IsNullOrWhiteSpace(inputJson))
-            return "Invalid request: inputJson is empty.";
+            return "Invalid request: empty inputJson.";
 
-        var opts = new JsonSerializerOptions
-        {
-            PropertyNameCaseInsensitive = true
-        };
-
-        FileRequest? request;
-
-        // 1) tenta desserializar direto
+        FileRequest? req;
         try
         {
-            request = JsonSerializer.Deserialize<FileRequest>(inputJson, opts);
+            req = JsonSerializer.Deserialize<FileRequest>(inputJson, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
         }
-        catch
+        catch (Exception ex)
         {
-            request = TryParseFlexible(inputJson);
+            return $"Invalid JSON: {ex.Message}";
         }
 
-        if (request == null)
-            return $"Invalid request: could not parse JSON. Input: {inputJson}";
+        if (req == null)
+            return "Invalid request: could not parse JSON.";
 
-        // 2) normaliza action e path
-        request.Action = NormalizeAction(request.Action);
-        request.Path = NormalizePathFromAliases(request);
+        var action = NormalizeAction(req.Action);
+        var path = req.Path?.Trim();
 
-        if (string.IsNullOrWhiteSpace(request.Action))
-            return $"Invalid request: missing 'action'. Input: {inputJson}";
+        if (string.IsNullOrWhiteSpace(action))
+            return "Invalid request: missing action.";
 
-        // 3) validações por ação
-        if (NeedsPath(request.Action) && string.IsNullOrWhiteSpace(request.Path))
-            return $"Invalid request: missing 'path' for action '{request.Action}'. Input: {inputJson}";
+        // ✅ regra especial: list sem path => lista raiz do workspace
+        if (action == "list" && string.IsNullOrWhiteSpace(path))
+            path = ".";
 
-        if (request.Action == "write_file" && request.Content == null)
-            request.Content = ""; // não quebra, escreve vazio
+        // Ações que realmente precisam de path
+        if (RequiresPath(action) && string.IsNullOrWhiteSpace(path))
+            return $"Invalid request: missing path for action '{action}'.";
 
-        // 4) resolve path seguro
-        var fullPath = NeedsPath(request.Action) ? GetSafePath(request.Path!) : _workspaceRoot;
-
-        // 5) executa ação
-        switch (request.Action)
+        try
         {
-            case "create_directory":
-                Directory.CreateDirectory(fullPath);
-                return $"Directory created: {MakeRelative(fullPath)}";
+            // Resolve path somente quando precisa
+            var fullPath = RequiresPath(action) ? ResolveSafe(path!) : _root;
 
-            case "write_file":
-                // garante diretório pai
-                var parent = Path.GetDirectoryName(fullPath);
-                if (!string.IsNullOrWhiteSpace(parent))
-                    Directory.CreateDirectory(parent);
+            switch (action)
+            {
+                case "create_directory":
+                    Directory.CreateDirectory(fullPath);
+                    return Ok(new { action, path = Rel(fullPath) });
 
-                await File.WriteAllTextAsync(fullPath, request.Content ?? "");
-                return $"File written: {MakeRelative(fullPath)}";
+                case "write_file":
+                    EnsureParentDir(fullPath);
+                    await File.WriteAllTextAsync(fullPath, req.Content ?? "");
+                    return Ok(new { action, path = Rel(fullPath), bytes = (req.Content ?? "").Length });
 
-            case "read_file":
-                if (!File.Exists(fullPath))
-                    return $"File not found: {MakeRelative(fullPath)}";
+                case "append_file":
+                    EnsureParentDir(fullPath);
+                    await File.AppendAllTextAsync(fullPath, req.Content ?? "");
+                    return Ok(new { action, path = Rel(fullPath), appendedBytes = (req.Content ?? "").Length });
 
-                return await File.ReadAllTextAsync(fullPath);
+                case "read_file":
+                    if (!File.Exists(fullPath))
+                        return NotFound(path!);
+                    var text = await File.ReadAllTextAsync(fullPath);
+                    return Ok(new { action, path = Rel(fullPath), content = text });
 
-            case "list":
-                if (!Directory.Exists(fullPath))
-                    return $"Directory not found: {MakeRelative(fullPath)}";
+                case "list":
+                    if (!Directory.Exists(fullPath))
+                        return NotFound(path!);
+                    var entries = Directory.EnumerateFileSystemEntries(fullPath)
+                        .Select(Rel)
+                        .OrderBy(x => x)
+                        .ToArray();
+                    return Ok(new { action, path = Rel(fullPath), entries });
 
-                var entries = Directory.EnumerateFileSystemEntries(fullPath)
-                    .Select(MakeRelative)
-                    .ToArray();
+                case "delete_file":
+                    if (!File.Exists(fullPath))
+                        return NotFound(path!);
+                    File.Delete(fullPath);
+                    return Ok(new { action, path = Rel(fullPath) });
 
-                return JsonSerializer.Serialize(new { entries });
+                case "delete_directory":
+                    if (!Directory.Exists(fullPath))
+                        return NotFound(path!);
+                    var recursive = req.Recursive ?? false;
+                    Directory.Delete(fullPath, recursive);
+                    return Ok(new { action, path = Rel(fullPath), recursive });
 
-            default:
-                return $"Invalid action: '{request.Action}'. Allowed: create_directory, write_file, read_file, list.";
+                case "move":
+                    if (string.IsNullOrWhiteSpace(req.To))
+                        return "Invalid request: missing 'to' for move.";
+
+                    var destMove = ResolveSafe(req.To.Trim());
+                    EnsureParentDir(destMove);
+
+                    if (File.Exists(fullPath))
+                    {
+                        File.Move(fullPath, destMove, overwrite: true);
+                        return Ok(new { action, from = Rel(fullPath), to = Rel(destMove), type = "file" });
+                    }
+                    if (Directory.Exists(fullPath))
+                    {
+                        if (Directory.Exists(destMove))
+                            Directory.Delete(destMove, recursive: true);
+
+                        Directory.Move(fullPath, destMove);
+                        return Ok(new { action, from = Rel(fullPath), to = Rel(destMove), type = "directory" });
+                    }
+                    return NotFound(path!);
+
+                case "copy":
+                    if (string.IsNullOrWhiteSpace(req.To))
+                        return "Invalid request: missing 'to' for copy.";
+
+                    var destCopy = ResolveSafe(req.To.Trim());
+                    EnsureParentDir(destCopy);
+
+                    if (File.Exists(fullPath))
+                    {
+                        File.Copy(fullPath, destCopy, overwrite: true);
+                        return Ok(new { action, from = Rel(fullPath), to = Rel(destCopy), type = "file" });
+                    }
+                    if (Directory.Exists(fullPath))
+                    {
+                        CopyDirectory(fullPath, destCopy);
+                        return Ok(new { action, from = Rel(fullPath), to = Rel(destCopy), type = "directory" });
+                    }
+                    return NotFound(path!);
+
+                case "exists":
+                    return Ok(new
+                    {
+                        action,
+                        path = Rel(fullPath),
+                        exists = File.Exists(fullPath) || Directory.Exists(fullPath),
+                        isFile = File.Exists(fullPath),
+                        isDirectory = Directory.Exists(fullPath)
+                    });
+
+                case "chmod":
+                    if (string.IsNullOrWhiteSpace(req.Mode))
+                        return "Invalid request: missing 'mode' for chmod. Use octal like 755 or 644.";
+
+                    if (!IsUnix())
+                        return "chmod is only supported on Unix-like systems (Linux/macOS).";
+
+                    if (!File.Exists(fullPath) && !Directory.Exists(fullPath))
+                        return NotFound(path!);
+
+                    if (!TryParseUnixMode(req.Mode.Trim(), out var unixMode, out var modeErr))
+                        return $"Invalid mode: {modeErr}";
+
+                    ApplyUnixMode(fullPath, unixMode);
+                    return Ok(new { action, path = Rel(fullPath), mode = req.Mode.Trim() });
+
+                default:
+                    return $"Invalid action: '{action}'.";
+            }
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return $"Unauthorized: {ex.Message}";
+        }
+        catch (IOException ex)
+        {
+            return $"IO error: {ex.Message}";
+        }
+        catch (Exception ex)
+        {
+            return $"Error: {ex.Message}";
         }
     }
 
-    // ----------------------------
-    // Helpers
-    // ----------------------------
+    // ---------------- Helpers ----------------
 
-    private static bool NeedsPath(string action) =>
-        action is "create_directory" or "write_file" or "read_file" or "list";
+    private static bool RequiresPath(string action) =>
+        action is "create_directory" or "write_file" or "append_file" or "read_file" or "list"
+            or "delete_file" or "delete_directory" or "move" or "copy" or "exists" or "chmod";
 
     private static string NormalizeAction(string? action)
     {
         action = (action ?? "").Trim().ToLowerInvariant();
-
         return action switch
         {
-            // create dir aliases
-            "mkdir" or "create_dir" or "create_folder" or "create_directory" => "create_directory",
-
-            // write file aliases
-            "write" or "writefile" or "save" or "save_file" or "write_file" => "write_file",
-
-            // read file aliases
-            "read" or "readfile" or "open" or "open_file" or "read_file" => "read_file",
-
-            // list dir aliases
-            "ls" or "dir" or "list_dir" or "list_files" or "list" => "list",
-
+            "mkdir" or "create_folder" or "create_dir" => "create_directory",
+            "write" or "save" => "write_file",
+            "append" => "append_file",
+            "read" or "cat" => "read_file",
+            "ls" or "dir" => "list",
+            "rm" => "delete_file",
+            "rmdir" => "delete_directory",
             _ => action
         };
     }
 
-    private static string NormalizePathFromAliases(FileRequest request)
+    private string ResolveSafe(string relative)
     {
-        // prefer path; fallback para aliases que LLM costuma inventar
-        var candidates = new[]
+        // aceita "." para raiz
+        if (string.IsNullOrWhiteSpace(relative) || relative.Trim() == ".")
+            return _root;
+
+        relative = relative.Replace('\\', Path.DirectorySeparatorChar)
+                           .Replace('/', Path.DirectorySeparatorChar)
+                           .Trim();
+
+        var combined = Path.Combine(_root, relative);
+        var full = Path.GetFullPath(combined);
+
+        if (!full.StartsWith(_root, StringComparison.OrdinalIgnoreCase))
+            throw new UnauthorizedAccessException("Path traversal detected (outside root).");
+
+        return full;
+    }
+
+    private string Rel(string fullPath)
+    {
+        if (fullPath.StartsWith(_root, StringComparison.OrdinalIgnoreCase))
+            return fullPath.Substring(_root.Length).TrimStart(Path.DirectorySeparatorChar);
+
+        return fullPath;
+    }
+
+    private static void EnsureParentDir(string filePath)
+    {
+        var parent = Path.GetDirectoryName(filePath);
+        if (!string.IsNullOrWhiteSpace(parent))
+            Directory.CreateDirectory(parent);
+    }
+
+    private static string Ok(object obj) => JsonSerializer.Serialize(new { ok = true, data = obj });
+
+    private static string NotFound(string path) => JsonSerializer.Serialize(new { ok = false, error = "not_found", path });
+
+    private static void CopyDirectory(string sourceDir, string destDir)
+    {
+        Directory.CreateDirectory(destDir);
+
+        foreach (var file in Directory.GetFiles(sourceDir))
         {
-            request.Path,
-            request.FilePath,
-            request.Filepath,
-            request.Dir,
-            request.Directory,
-            request.Filename
-        };
+            var destFile = Path.Combine(destDir, Path.GetFileName(file));
+            File.Copy(file, destFile, overwrite: true);
+        }
 
-        return candidates.FirstOrDefault(s => !string.IsNullOrWhiteSpace(s))?.Trim() ?? "";
+        foreach (var dir in Directory.GetDirectories(sourceDir))
+        {
+            var destSub = Path.Combine(destDir, Path.GetFileName(dir));
+            CopyDirectory(dir, destSub);
+        }
     }
 
-    private string GetSafePath(string relativePath)
+    private static bool TryParseUnixMode(string octal, out UnixFileMode mode, out string error)
     {
-        // normaliza separadores
-        relativePath = relativePath
-            .Trim()
-            .Replace('\\', Path.DirectorySeparatorChar)
-            .Replace('/', Path.DirectorySeparatorChar);
+        error = "";
+        mode = default;
 
-        var combined = Path.Combine(_workspaceRoot, relativePath);
-        var fullPath = Path.GetFullPath(combined);
+        octal = octal.StartsWith("0") ? octal : "0" + octal;
 
-        // impede traversal fora do workspace
-        if (!fullPath.StartsWith(_workspaceRoot, StringComparison.OrdinalIgnoreCase))
-            throw new UnauthorizedAccessException("Path traversal detected.");
+        if (octal.Length < 4 || octal.Length > 5 || octal.Any(c => c < '0' || c > '7'))
+        {
+            error = "Mode must be an octal string like 755 or 644.";
+            return false;
+        }
 
-        return fullPath;
-    }
-
-    private string MakeRelative(string fullPath)
-    {
-        if (fullPath.StartsWith(_workspaceRoot, StringComparison.OrdinalIgnoreCase))
-            return fullPath.Substring(_workspaceRoot.Length).TrimStart(Path.DirectorySeparatorChar);
-
-        return fullPath;
-    }
-
-    private static FileRequest? TryParseFlexible(string inputJson)
-    {
         try
         {
-            using var doc = JsonDocument.Parse(inputJson);
-            var root = doc.RootElement;
-
-            string? GetString(params string[] names)
-            {
-                foreach (var n in names)
-                {
-                    if (root.TryGetProperty(n, out var p) && p.ValueKind == JsonValueKind.String)
-                        return p.GetString();
-                }
-                return null;
-            }
-
-            // aceita content tanto string quanto número/bool convertendo pra string
-            string? GetAnyAsString(params string[] names)
-            {
-                foreach (var n in names)
-                {
-                    if (!root.TryGetProperty(n, out var p)) continue;
-
-                    return p.ValueKind switch
-                    {
-                        JsonValueKind.String => p.GetString(),
-                        JsonValueKind.Number => p.GetRawText(),
-                        JsonValueKind.True => "true",
-                        JsonValueKind.False => "false",
-                        JsonValueKind.Null => null,
-                        _ => p.GetRawText()
-                    };
-                }
-                return null;
-            }
-
-            return new FileRequest
-            {
-                Action = GetString("action", "Action"),
-                Path = GetString("path", "Path", "filePath", "filepath", "dir", "directory", "filename"),
-                Content = GetAnyAsString("content", "Content", "text", "Text", "body")
-            };
+            var value = Convert.ToInt32(octal, 8);
+            mode = (UnixFileMode)value;
+            return true;
         }
         catch
         {
-            return null;
+            error = "Failed to parse octal mode.";
+            return false;
         }
     }
 
-    // ----------------------------
-    // Request DTO
-    // ----------------------------
-    private class FileRequest
+    private static bool IsUnix()
+        => RuntimeInformation.IsOSPlatform(OSPlatform.Linux) || RuntimeInformation.IsOSPlatform(OSPlatform.OSX);
+
+    private static void ApplyUnixMode(string fullPath, UnixFileMode mode)
+    {
+        if (!IsUnix())
+            throw new PlatformNotSupportedException("chmod is only supported on Unix-like systems.");
+
+        ApplyUnixModeUnixOnly(fullPath, mode);
+    }
+
+    [SupportedOSPlatform("linux")]
+    [SupportedOSPlatform("osx")]
+    private static void ApplyUnixModeUnixOnly(string fullPath, UnixFileMode mode)
+    {
+        // No Unix, funciona para arquivo e diretório
+        File.SetUnixFileMode(fullPath, mode);
+    }
+
+    private sealed class FileRequest
     {
         [JsonPropertyName("action")]
         public string? Action { get; set; }
@@ -225,23 +341,16 @@ public class FileSystemTool : ITool
         [JsonPropertyName("path")]
         public string? Path { get; set; }
 
-        // aliases comuns
-        [JsonPropertyName("filePath")]
-        public string? FilePath { get; set; }
-
-        [JsonPropertyName("filepath")]
-        public string? Filepath { get; set; }
-
-        [JsonPropertyName("dir")]
-        public string? Dir { get; set; }
-
-        [JsonPropertyName("directory")]
-        public string? Directory { get; set; }
-
-        [JsonPropertyName("filename")]
-        public string? Filename { get; set; }
+        [JsonPropertyName("to")]
+        public string? To { get; set; }
 
         [JsonPropertyName("content")]
         public string? Content { get; set; }
+
+        [JsonPropertyName("recursive")]
+        public bool? Recursive { get; set; }
+
+        [JsonPropertyName("mode")]
+        public string? Mode { get; set; }
     }
 }

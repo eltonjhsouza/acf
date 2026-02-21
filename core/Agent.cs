@@ -37,14 +37,15 @@ public sealed class Agent
     public async Task RunAsync(string objective)
     {
         if (_tools.Count == 0)
-            throw new InvalidOperationException("No tools were added. Use .WithTool(new FileSystemTool()) first.");
+            throw new InvalidOperationException("No tools were added. Use .WithTool(...) first.");
+
+        var task = new TaskDefinition { Objective = objective };
 
         var planner = new Planner(_llm, _instructions, _tools);
-        var orchestrator = new AgentOrchestrator(planner, _tools);
+        var repairer = new StepRepairer(_llm, _instructions, _tools);
 
-        await orchestrator.RunAsync(new TaskDefinition
-        {
-            Objective = objective
-        });
+        var orchestrator = new AgentOrchestrator(planner, _tools, repairer);
+
+        await orchestrator.RunAsync(task);
     }
 }

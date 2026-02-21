@@ -17,8 +17,11 @@ var llm = new OpenAiChatClient(apiKey, "gpt-4.1");
 
 var agent = Agent.Create("General", llm)
     .WithInstructions("You are a safe execution agent. Always follow tool contracts.")
-    .WithTool(new FileSystemTool(rootPath: @"C:\playground\c#\agentes\AgentWorkspace"));
+    .WithTool(new FileSystemTool(rootPath: @"C:\playground\c#\agentes\AgentWorkspace"))
+    .WithTool(new HttpTool());
 
 
-string action = "corrija o arquivo index.hml por index.html e adicione a tag <title> com o texto 'Página Inicial'";
-await agent.RunAsync(action);
+// await agent.RunAsync("Use http tool para buscar https://iacopi.com.br/ e salve o body em iacopi.html no filesystem.");
+// await agent.RunAsync("Mostre o diretório atual (pwd).");
+await agent.RunAsync("Mostre o diretório atual (pwd) e depois liste a raiz.");
+// await agent.RunAsync("Use http para buscar https://example.com e salve em page.html no diretório atual.");

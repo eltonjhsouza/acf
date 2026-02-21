@@ -29,7 +29,7 @@ public sealed class FileSystemTool : ITool
               "properties":{
                 "action":{"type":"string","enum":[
                   "create_directory","write_file","append_file","read_file","list",
-                  "delete_file","delete_directory","move","copy","exists","chmod"
+                  "delete_file","delete_directory","move","copy","exists","chmod", "cd", "pwd"
                 ]},
                 "path":{"type":"string","description":"Relative path under the configured root. If omitted for list, lists root."},
                 "to":{"type":"string","description":"Destination relative path for move/copy."},

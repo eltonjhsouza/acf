@@ -38,6 +38,7 @@ public sealed class Planner
             - When the user says 'root directory', interpret it as the tool root (workspace root).
             - For listing the tool root, use: toolInput {{ ""action"": ""list"" }} (path omitted) OR path ""."".
             - Never use absolute paths like 'C:' or '/'.
+            - Each step MUST include a non-empty description field.
 
             Objective:
             {task.Objective}

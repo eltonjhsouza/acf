@@ -2,9 +2,11 @@
 using AgentCore.LLM;
 using AgentCore.Tools;
 
+DotNetEnv.Env.Load();
 
-var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY") 
-    ?? throw new InvalidOperationException("OPENAI_API_KEY environment variable is not set");
+
+
+var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
 
 var llm = new OpenAiChatClient(apiKey, "gpt-4.1");
 

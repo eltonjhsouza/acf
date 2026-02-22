@@ -23,27 +23,23 @@ public class AgentOrchestrator
         var state = new AgentState();
         state.Steps = await _planner.CreatePlanAsync(task);
 
-        while (!state.IsCompleted)
-        {
-            if (state.CurrentStepIndex >= state.Steps.Count)
-            {
-                state.IsCompleted = true;
-                break;
-            }
+        Console.WriteLine($"Plan steps: {state.Steps.Count}");
+        for (var i = 0; i < state.Steps.Count; i++)
+            Console.WriteLine($"Step[{i}] tool={state.Steps[i].ToolName} desc='{state.Steps[i].Description}'");
 
-            // Vamos permitir tentar reparar o step algumas vezes
+        while (state.CurrentStepIndex < state.Steps.Count)
+        {
             var repairs = 0;
 
             while (true)
             {
                 var step = state.Steps[state.CurrentStepIndex];
 
-                // 1) description não pode ser vazia (senão dá "Executing:" em branco)
+                // --- validations / repairs ---
                 if (string.IsNullOrWhiteSpace(step.Description))
                 {
                     if (repairs++ >= MaxRepairsPerStep)
-                        step.Description = $"Step {state.CurrentStepIndex + 1}"; // fallback final
-
+                        step.Description = $"Step {state.CurrentStepIndex + 1}";
                     else
                     {
                         step = await _repairer.RepairAsync(task, step, "description is empty");
@@ -52,7 +48,6 @@ public class AgentOrchestrator
                     }
                 }
 
-                // 2) toolName obrigatório
                 if (string.IsNullOrWhiteSpace(step.ToolName))
                 {
                     if (repairs++ >= MaxRepairsPerStep)
@@ -75,7 +70,6 @@ public class AgentOrchestrator
                     toolName = "filesystem";
                 }
 
-                // 3) tool tem que existir (se não existir, tenta reparar)
                 if (!_tools.TryGet(toolName, out var tool))
                 {
                     if (repairs++ >= MaxRepairsPerStep)
@@ -83,31 +77,30 @@ public class AgentOrchestrator
 
                     step = await _repairer.RepairAsync(task, step,
                         $"tool '{step.ToolName}' not found. Available: {_tools.ListNames()}");
-
                     state.Steps[state.CurrentStepIndex] = step;
                     continue;
                 }
 
-                // 4) toolInput JSON
                 var inputJson = step.ToolInput.ValueKind == JsonValueKind.Undefined
                     ? "{}"
                     : step.ToolInput.GetRawText();
 
-                // Se JSON estiver inválido por algum motivo, tenta reparar
                 if (!IsValidJson(inputJson))
                 {
                     if (repairs++ >= MaxRepairsPerStep)
-                        throw new Exception($"Invalid toolInput JSON for step {state.CurrentStepIndex}: {inputJson}");
+                        throw new Exception($"Invalid toolInput JSON at step {state.CurrentStepIndex}: {inputJson}");
 
                     step = await _repairer.RepairAsync(task, step, "toolInput is not valid JSON");
                     state.Steps[state.CurrentStepIndex] = step;
                     continue;
                 }
 
-                // ✅ WORKING DIRECTORY (somente para filesystem)
+                // ✅ aplica templates ({{last.body}} etc.)
+                inputJson = TemplateEngine.ApplyJson(inputJson, state);
+
+                // ✅ cwd para filesystem
                 if (toolName.Equals("filesystem", StringComparison.OrdinalIgnoreCase))
                 {
-                    // Lê action/path do JSON
                     using var doc = JsonDocument.Parse(inputJson);
                     var root = doc.RootElement;
 
@@ -115,16 +108,20 @@ public class AgentOrchestrator
                         ? a.GetString()!.Trim().ToLowerInvariant()
                         : "";
 
-                    // 1) pwd: não chama tool
                     if (action == "pwd")
                     {
                         var resultPwd = JsonSerializer.Serialize(new { ok = true, cwd = state.WorkingDirectory });
                         Console.WriteLine($"Result: {resultPwd}");
+
+                        // salva last result também (pra consistência)
+                        state.LastResultRaw = resultPwd;
+                        state.LastResultJson?.Dispose();
+                        state.LastResultJson = JsonDocument.Parse(resultPwd);
+
                         state.CurrentStepIndex++;
-                        break; // sai do while(true) de repair para voltar ao loop principal
+                        break; // ✅ sai só do repair-loop e volta pro loop principal
                     }
 
-                    // 2) cd: valida se o destino existe e é diretório, depois atualiza estado
                     if (action == "cd")
                     {
                         var target = root.TryGetProperty("path", out var p) && p.ValueKind == JsonValueKind.String
@@ -143,15 +140,10 @@ public class AgentOrchestrator
 
                         var combined = CombineCwd(state.WorkingDirectory, target);
 
-                        // valida diretório chamando a própria tool (exists)
                         var existsReq = JsonSerializer.Serialize(new { action = "exists", path = combined });
                         var existsRespJson = await tool.ExecuteAsync(existsReq);
 
-                        if (!IsValidJson(existsRespJson))
-                            throw new Exception($"filesystem exists returned invalid JSON: {existsRespJson}");
-
                         using var existsDoc = JsonDocument.Parse(existsRespJson);
-
                         var ok = existsDoc.RootElement.TryGetProperty("ok", out var okEl) && okEl.ValueKind == JsonValueKind.True;
 
                         if (!ok)
@@ -164,8 +156,7 @@ public class AgentOrchestrator
                             continue;
                         }
 
-                        var isDir = existsDoc.RootElement
-                            .GetProperty("data")
+                        var isDir = existsDoc.RootElement.GetProperty("data")
                             .TryGetProperty("isDirectory", out var isDirEl) && isDirEl.ValueKind == JsonValueKind.True;
 
                         if (!isDir)
@@ -182,32 +173,38 @@ public class AgentOrchestrator
 
                         var resultCd = JsonSerializer.Serialize(new { ok = true, cwd = state.WorkingDirectory });
                         Console.WriteLine($"Result: {resultCd}");
+
+                        // salva last result também
+                        state.LastResultRaw = resultCd;
+                        state.LastResultJson?.Dispose();
+                        state.LastResultJson = JsonDocument.Parse(resultCd);
+
                         state.CurrentStepIndex++;
-                        break;
+                        break; // ✅ sai só do repair-loop
                     }
 
-                    // 3) Para list sem path => usa cwd
-                    // 4) Para qualquer ação com path relativo => prefixa com cwd
                     inputJson = RewriteFilesystemPathWithCwd(inputJson, state.WorkingDirectory);
                 }
 
-                // 5) Executa tool e captura falhas comuns para reparar o step
+                // --- execute tool ---
                 var result = await tool.ExecuteAsync(inputJson);
-
-                // Se a tool respondeu erro de "missing path" e ainda temos reparos,
-                // tenta pedir pro LLM corrigir o step
-                if (result.Contains("missing path", StringComparison.OrdinalIgnoreCase) && repairs < MaxRepairsPerStep)
-                {
-                    repairs++;
-                    step = await _repairer.RepairAsync(task, step, $"Tool returned error: {result}");
-                    state.Steps[state.CurrentStepIndex] = step;
-                    continue;
-                }
-
                 Console.WriteLine($"Result: {result}");
 
+                // ✅ guarda last result
+                state.LastResultRaw = result;
+                try
+                {
+                    state.LastResultJson?.Dispose();
+                    state.LastResultJson = JsonDocument.Parse(result);
+                }
+                catch
+                {
+                    state.LastResultJson = null;
+                }
+
+                // ✅ avança step
                 state.CurrentStepIndex++;
-                break; // step executado com sucesso
+                break; // ✅ sai do repair-loop e volta pro loop principal
             }
         }
 

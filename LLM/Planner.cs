@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Text;
 using System.Text.Json;
 using AgentCore.LLM;
@@ -40,6 +41,27 @@ public sealed class Planner
             - Never use absolute paths like 'C:' or '/'.
             - Each step MUST include a non-empty description field.
 
+            - To pass data between steps, you MUST use templates:
+              - For HTTP response body from the previous step, use exactly: ""{{{{last.body}}}}""
+              - For Browser HTML from the previous step, use exactly: ""{{{{last.html}}}}"" (maps to last.data.html)
+            - Do NOT use placeholders like ""<<body from previous step>>"" or ""{{{{last.body}}}}"" with single braces or any other placeholder format.
+
+            - If the user asks to save the fetched page to a file, set http toolInput maxChars to 200000 (or -1 if needed).
+            - Para browser.screenshot, use path relativo como ""screenshots/page.png"".
+
+            - When using the browser tool to fetch HTML from a URL, you MUST do:
+              1) browser goto ""{{{{url}}}}""
+              2) browser html
+            - Never call browser html without first navigating to the target URL in the same plan.
+
+            - If the user asks to scroll to the end / scroll até o fim, you MUST do this sequence:
+                1) browser goto ""{{{{url}}}}""
+                2) browser scroll_to_bottom
+                3) browser wait (ms: 1500)
+                4) browser html
+                5) filesystem write_file with content ""{{{{last.html}}}}""
+            - For Browser HTML from the previous step, use exactly: ""{{{{last.html}}}}""
+
             Objective:
             {task.Objective}
             ";
@@ -50,7 +72,12 @@ public sealed class Planner
 
         var steps = JsonSerializer.Deserialize<List<StepDefinition>>(
             json,
-            new JsonSerializerOptions { PropertyNameCaseInsensitive = true }
+            new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true,
+                ReadCommentHandling = JsonCommentHandling.Skip,
+                AllowTrailingCommas = true
+            }
         ) ?? new();
 
         if (steps.Count == 0)

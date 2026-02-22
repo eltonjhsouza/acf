@@ -17,7 +17,7 @@ public sealed class HttpTool : ITool
     public ToolSpec Spec => new ToolSpec
     {
         Name = "http",
-        Description = "Performs HTTP requests (GET/POST). Returns status code and response body (truncated).",
+        Description = "Performs HTTP requests (GET/POST). Returns status code and response body (optionally truncated).",
         JsonSchema =
             """
             {
@@ -27,7 +27,8 @@ public sealed class HttpTool : ITool
                 "url":{"type":"string"},
                 "headers":{"type":"object","additionalProperties":{"type":"string"}},
                 "body":{"type":"string"},
-                "contentType":{"type":"string","description":"e.g. application/json"}
+                "contentType":{"type":"string","description":"e.g. application/json"},
+                "maxChars":{"type":"integer","description":"Max characters to return in body. 0 or omitted = default 4000. -1 = no truncation (use carefully)."}
               },
               "required":["method","url"]
             }
@@ -64,6 +65,10 @@ public sealed class HttpTool : ITool
         if (method is not "GET" and not "POST")
             return "Invalid request: method must be GET or POST.";
 
+        // truncamento configurável
+        var maxChars = req.MaxChars ?? 0;   // 0 = default
+        if (maxChars == 0) maxChars = 4000; // default antigo
+
         try
         {
             using var message = new HttpRequestMessage(
@@ -88,10 +93,9 @@ public sealed class HttpTool : ITool
             using var resp = await _http.SendAsync(message);
             var respBody = await resp.Content.ReadAsStringAsync();
 
-            // Trunca para não explodir contexto
-            const int max = 4000;
-            if (respBody.Length > max)
-                respBody = respBody.Substring(0, max) + "...(truncated)";
+            // truncar se maxChars > 0
+            if (maxChars > 0 && respBody.Length > maxChars)
+                respBody = respBody.Substring(0, maxChars) + "...(truncated)";
 
             var result = new
             {
@@ -125,5 +129,8 @@ public sealed class HttpTool : ITool
 
         [JsonPropertyName("contentType")]
         public string? ContentType { get; set; }
+
+        [JsonPropertyName("maxChars")]
+        public int? MaxChars { get; set; }
     }
 }

@@ -8,6 +8,14 @@ namespace AgentCore.Tools;
 public sealed class FileSystemTool : ITool
 {
     private readonly string _root;
+#if NET6_0_OR_GREATER
+    [System.Runtime.Versioning.SupportedOSPlatformGuard("linux")]
+#else
+    [System.Runtime.Versioning.SupportedOSPlatform("linux")]
+#endif
+    [System.Runtime.Versioning.SupportedOSPlatformGuard("osx")]
+    private static bool IsUnixGuarded()
+        => RuntimeInformation.IsOSPlatform(OSPlatform.Linux) || RuntimeInformation.IsOSPlatform(OSPlatform.OSX);
 
     public FileSystemTool(string rootPath)
     {
@@ -181,7 +189,7 @@ public sealed class FileSystemTool : ITool
                     if (string.IsNullOrWhiteSpace(req.Mode))
                         return "Invalid request: missing 'mode' for chmod. Use octal like 755 or 644.";
 
-                    if (!IsUnix())
+                    if (!IsUnixGuarded())
                         return "chmod is only supported on Unix-like systems (Linux/macOS).";
 
                     if (!File.Exists(fullPath) && !Directory.Exists(fullPath))

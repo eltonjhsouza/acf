@@ -44,9 +44,9 @@ public class LlmClient
         using var doc = JsonDocument.Parse(responseString);
 
         return doc.RootElement
-                  .GetProperty("choices")[0]
-                  .GetProperty("message")
-                  .GetProperty("content")
-                  .GetString();
+        .GetProperty("choices")[0]
+        .GetProperty("message")
+        .GetProperty("content")
+        .GetString() ?? "";
     }
 }

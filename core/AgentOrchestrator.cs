@@ -180,15 +180,48 @@ public class AgentOrchestrator
                         state.LastResultJson = JsonDocument.Parse(resultCd);
 
                         state.CurrentStepIndex++;
-                        break; // ✅ sai só do repair-loop
+                        break;
                     }
 
                     inputJson = RewriteFilesystemPathWithCwd(inputJson, state.WorkingDirectory);
                 }
 
                 // --- execute tool ---
+                inputJson = ReplaceTokens(inputJson, state);
+
+                if (!IsValidJson(inputJson))
+                {
+                    if (repairs++ >= MaxRepairsPerStep)
+                        throw new Exception($"toolInput became invalid JSON after templating: {inputJson}");
+
+                    step = await _repairer.RepairAsync(task, step, "toolInput became invalid JSON after templating");
+                    state.Steps[state.CurrentStepIndex] = step;
+                    continue;
+                }
+
+                if (ContainsUnresolvedLastToken(inputJson))
+                {
+                    if (repairs++ >= MaxRepairsPerStep)
+                        throw new Exception($"toolInput still contains unresolved template token: {inputJson}");
+
+                    step = await _repairer.RepairAsync(task, step,
+                        "toolInput contains unresolved template token (last/last.body/last.html/last.answer)");
+                    state.Steps[state.CurrentStepIndex] = step;
+                    continue;
+                }
+
                 var result = await tool.ExecuteAsync(inputJson);
                 Console.WriteLine($"Result: {result}");
+
+                if (!IsSuccessfulToolResult(result, out var toolError))
+                {
+                    if (repairs++ >= MaxRepairsPerStep)
+                        throw new Exception($"tool execution failed at step {state.CurrentStepIndex}: {toolError}");
+
+                    step = await _repairer.RepairAsync(task, step, $"tool execution failed: {toolError}");
+                    state.Steps[state.CurrentStepIndex] = step;
+                    continue;
+                }
 
                 // ✅ guarda last result
                 state.LastResultRaw = result;
@@ -211,6 +244,53 @@ public class AgentOrchestrator
         Console.WriteLine("Task Completed.");
     }
 
+    private static string ReplaceTokens(string s, AgentState state)
+    {
+        if (string.IsNullOrEmpty(s))
+            return s;
+
+        // Substituição básica do resultado bruto
+        s = s.Replace("{{last}}", state.LastResultRaw ?? "");
+
+        if (string.IsNullOrWhiteSpace(state.LastResultRaw))
+            return s;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(state.LastResultRaw);
+
+            // HTTP → { body: "..." }
+            if (doc.RootElement.TryGetProperty("body", out var bodyEl) &&
+                bodyEl.ValueKind == JsonValueKind.String)
+            {
+                s = s.Replace("{{last.body}}", bodyEl.GetString());
+            }
+
+            // Browser / Tavily → { data: { html: "...", answer: "..." } }
+            if (doc.RootElement.TryGetProperty("data", out var dataEl) &&
+                dataEl.ValueKind == JsonValueKind.Object)
+            {
+                if (dataEl.TryGetProperty("html", out var htmlEl) &&
+                    htmlEl.ValueKind == JsonValueKind.String)
+                {
+                    s = s.Replace("{{last.html}}", htmlEl.GetString());
+                }
+
+                if (dataEl.TryGetProperty("answer", out var answerEl) &&
+                    answerEl.ValueKind == JsonValueKind.String)
+                {
+                    s = s.Replace("{{last.answer}}", answerEl.GetString());
+                }
+            }
+        }
+        catch
+        {
+            // ignora erro de parse
+        }
+
+        return s;
+    }
+
     private static bool IsValidJson(string json)
     {
         try
@@ -222,6 +302,98 @@ public class AgentOrchestrator
         {
             return false;
         }
+    }
+
+    private static bool ContainsUnresolvedLastToken(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        return text.Contains("{{last", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("{last", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsSuccessfulToolResult(string result, out string error)
+    {
+        error = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(result))
+        {
+            error = "empty tool result";
+            return false;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(result);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                return true;
+
+            var root = doc.RootElement;
+            if (root.TryGetProperty("ok", out var okEl))
+            {
+                if (okEl.ValueKind == JsonValueKind.False)
+                {
+                    error = ExtractErrorMessage(root);
+                    return false;
+                }
+
+                if (okEl.ValueKind == JsonValueKind.True)
+                    return true;
+            }
+
+            if (root.TryGetProperty("error", out _))
+            {
+                error = ExtractErrorMessage(root);
+                return false;
+            }
+
+            return true;
+        }
+        catch
+        {
+            if (LooksLikeErrorString(result))
+            {
+                error = result;
+                return false;
+            }
+
+            return true;
+        }
+    }
+
+    private static string ExtractErrorMessage(JsonElement root)
+    {
+        if (root.TryGetProperty("message", out var msgEl) && msgEl.ValueKind == JsonValueKind.String)
+            return msgEl.GetString() ?? "unknown error";
+
+        if (root.TryGetProperty("error", out var errEl))
+        {
+            if (errEl.ValueKind == JsonValueKind.String)
+                return errEl.GetString() ?? "unknown error";
+
+            if (errEl.ValueKind == JsonValueKind.Object &&
+                errEl.TryGetProperty("message", out var nestedMsg) &&
+                nestedMsg.ValueKind == JsonValueKind.String)
+            {
+                return nestedMsg.GetString() ?? "unknown error";
+            }
+
+            return errEl.GetRawText();
+        }
+
+        return "tool returned ok=false";
+    }
+
+    private static bool LooksLikeErrorString(string text)
+    {
+        var trimmed = text.TrimStart();
+        return trimmed.StartsWith("Invalid", StringComparison.OrdinalIgnoreCase) ||
+               trimmed.StartsWith("Error", StringComparison.OrdinalIgnoreCase) ||
+               trimmed.StartsWith("Unauthorized", StringComparison.OrdinalIgnoreCase) ||
+               trimmed.StartsWith("HTTP error", StringComparison.OrdinalIgnoreCase) ||
+               trimmed.StartsWith("IO error", StringComparison.OrdinalIgnoreCase) ||
+               trimmed.StartsWith("playwright_error", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string CombineCwd(string cwd, string path)

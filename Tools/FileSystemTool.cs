@@ -53,7 +53,7 @@ public sealed class FileSystemTool : ITool
     public async Task<string> ExecuteAsync(string inputJson)
     {
         if (string.IsNullOrWhiteSpace(inputJson))
-            return "Invalid request: empty inputJson.";
+            return Fail("invalid_request", "empty inputJson");
 
         FileRequest? req;
         try
@@ -65,17 +65,17 @@ public sealed class FileSystemTool : ITool
         }
         catch (Exception ex)
         {
-            return $"Invalid JSON: {ex.Message}";
+            return Fail("invalid_json", ex.Message);
         }
 
         if (req == null)
-            return "Invalid request: could not parse JSON.";
+            return Fail("invalid_request", "could not parse JSON");
 
         var action = NormalizeAction(req.Action);
         var path = req.Path?.Trim();
 
         if (string.IsNullOrWhiteSpace(action))
-            return "Invalid request: missing action.";
+            return Fail("invalid_request", "missing action");
 
         // ✅ regra especial: list sem path => lista raiz do workspace
         if (action == "list" && string.IsNullOrWhiteSpace(path))
@@ -83,7 +83,7 @@ public sealed class FileSystemTool : ITool
 
         // Ações que realmente precisam de path
         if (RequiresPath(action) && string.IsNullOrWhiteSpace(path))
-            return $"Invalid request: missing path for action '{action}'.";
+            return Fail("invalid_request", $"missing path for action '{action}'");
 
         try
         {
@@ -136,7 +136,7 @@ public sealed class FileSystemTool : ITool
 
                 case "move":
                     if (string.IsNullOrWhiteSpace(req.To))
-                        return "Invalid request: missing 'to' for move.";
+                        return Fail("invalid_request", "missing 'to' for move");
 
                     var destMove = ResolveSafe(req.To.Trim());
                     EnsureParentDir(destMove);
@@ -158,7 +158,7 @@ public sealed class FileSystemTool : ITool
 
                 case "copy":
                     if (string.IsNullOrWhiteSpace(req.To))
-                        return "Invalid request: missing 'to' for copy.";
+                        return Fail("invalid_request", "missing 'to' for copy");
 
                     var destCopy = ResolveSafe(req.To.Trim());
                     EnsureParentDir(destCopy);
@@ -187,35 +187,35 @@ public sealed class FileSystemTool : ITool
 
                 case "chmod":
                     if (string.IsNullOrWhiteSpace(req.Mode))
-                        return "Invalid request: missing 'mode' for chmod. Use octal like 755 or 644.";
+                        return Fail("invalid_request", "missing 'mode' for chmod. Use octal like 755 or 644");
 
                     if (!IsUnixGuarded())
-                        return "chmod is only supported on Unix-like systems (Linux/macOS).";
+                        return Fail("platform_not_supported", "chmod is only supported on Unix-like systems (Linux/macOS)");
 
                     if (!File.Exists(fullPath) && !Directory.Exists(fullPath))
                         return NotFound(path!);
 
                     if (!TryParseUnixMode(req.Mode.Trim(), out var unixMode, out var modeErr))
-                        return $"Invalid mode: {modeErr}";
+                        return Fail("invalid_mode", modeErr);
 
                     ApplyUnixMode(fullPath, unixMode);
                     return Ok(new { action, path = Rel(fullPath), mode = req.Mode.Trim() });
 
                 default:
-                    return $"Invalid action: '{action}'.";
+                    return Fail("invalid_action", $"'{action}'");
             }
         }
         catch (UnauthorizedAccessException ex)
         {
-            return $"Unauthorized: {ex.Message}";
+            return Fail("unauthorized", ex.Message);
         }
         catch (IOException ex)
         {
-            return $"IO error: {ex.Message}";
+            return Fail("io_error", ex.Message);
         }
         catch (Exception ex)
         {
-            return $"Error: {ex.Message}";
+            return Fail("error", ex.Message);
         }
     }
 
@@ -276,6 +276,8 @@ public sealed class FileSystemTool : ITool
     }
 
     private static string Ok(object obj) => JsonSerializer.Serialize(new { ok = true, data = obj });
+
+    private static string Fail(string error, string message) => JsonSerializer.Serialize(new { ok = false, error, message });
 
     private static string NotFound(string path) => JsonSerializer.Serialize(new { ok = false, error = "not_found", path });
 

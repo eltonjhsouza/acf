@@ -38,7 +38,7 @@ public sealed class HttpTool : ITool
     public async Task<string> ExecuteAsync(string inputJson)
     {
         if (string.IsNullOrWhiteSpace(inputJson))
-            return "Invalid request: empty inputJson.";
+            return Fail("invalid_request", "empty inputJson");
 
         HttpRequest? req;
         try
@@ -50,20 +50,20 @@ public sealed class HttpTool : ITool
         }
         catch (Exception ex)
         {
-            return $"Invalid JSON: {ex.Message}";
+            return Fail("invalid_json", ex.Message);
         }
 
         if (req == null)
-            return "Invalid request: could not parse JSON.";
+            return Fail("invalid_request", "could not parse JSON");
 
         var method = (req.Method ?? "").Trim().ToUpperInvariant();
         var url = (req.Url ?? "").Trim();
 
         if (string.IsNullOrWhiteSpace(method) || string.IsNullOrWhiteSpace(url))
-            return "Invalid request: method and url are required.";
+            return Fail("invalid_request", "method and url are required");
 
         if (method is not "GET" and not "POST")
-            return "Invalid request: method must be GET or POST.";
+            return Fail("invalid_request", "method must be GET or POST");
 
         // truncamento configurável
         var maxChars = req.MaxChars ?? 0;   // 0 = default
@@ -109,9 +109,12 @@ public sealed class HttpTool : ITool
         }
         catch (Exception ex)
         {
-            return $"HTTP error: {ex.Message}";
+            return Fail("http_error", ex.Message);
         }
     }
+
+    private static string Fail(string error, string message)
+        => JsonSerializer.Serialize(new { ok = false, error, message });
 
     private sealed class HttpRequest
     {

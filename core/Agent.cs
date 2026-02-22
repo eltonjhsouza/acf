@@ -1,3 +1,4 @@
+using System.Text.Json;
 using AgentCore.LLM;
 using AgentCore.Tools;
 
@@ -47,5 +48,42 @@ public sealed class Agent
         var orchestrator = new AgentOrchestrator(planner, _tools, repairer);
 
         await orchestrator.RunAsync(task);
+    }
+
+    public async Task<string> RunWithNativeToolCallingAsync(string objective, int maxToolRounds = 8)
+    {
+        if (!_llm.SupportsToolCalling)
+            throw new InvalidOperationException(
+                $"LLM client '{_llm.GetType().Name}' does not support native tool calling.");
+
+        if (_tools.Count == 0)
+            throw new InvalidOperationException("No tools were added. Use .WithTool(...) first.");
+
+        var registry = new ToolRegistry(_tools);
+        var specs = _tools.Select(t => t.Spec).ToArray();
+
+        var response = await _llm.CompleteWithToolsAsync(
+            system: _instructions,
+            user: objective,
+            tools: specs,
+            toolExecutor: async (toolName, argsJson) =>
+            {
+                if (!registry.TryGet(toolName, out var tool))
+                {
+                    return JsonSerializer.Serialize(new
+                    {
+                        ok = false,
+                        error = "tool_not_found",
+                        name = toolName,
+                        available = registry.ListNames()
+                    });
+                }
+
+                return await tool.ExecuteAsync(argsJson);
+            },
+            temperature: 0.2,
+            maxToolRounds: maxToolRounds);
+
+        return response.FinalText;
     }
 }

@@ -26,34 +26,34 @@ public sealed class StepRepairer
         var toolsCatalog = BuildToolsCatalog(_tools);
 
         var user = $@"
-We have a task:
-{task.Objective}
+            We have a task:
+            {task.Objective}
 
-A step is invalid. Fix it while preserving its intent.
+            A step is invalid. Fix it while preserving its intent.
 
-Validation error:
-{error}
+            Validation error:
+            {error}
 
-Tool catalog (toolName must be one of these, and toolInput must follow schema):
-{toolsCatalog}
+            Tool catalog (toolName must be one of these, and toolInput must follow schema):
+            {toolsCatalog}
 
-Bad step JSON:
-{JsonSerializer.Serialize(badStep)}
+            Bad step JSON:
+            {JsonSerializer.Serialize(badStep)}
 
-Return ONLY a corrected JSON object with exactly these fields:
-{{
-  ""order"": <int>,
-  ""description"": <non-empty string>,
-  ""toolName"": <string>,
-  ""toolInput"": <object>
-}}
+            Return ONLY a corrected JSON object with exactly these fields:
+            {{
+                ""order"": <int>,
+                ""description"": <non-empty string>,
+                ""toolName"": <string>,
+                ""toolInput"": <object>
+            }}
 
-Rules:
-- description must be non-empty
-- toolName must exist in catalog
-- toolInput must match the schema for that tool
-- Do not add extra fields
-";
+            Rules:
+            - description must be non-empty
+            - toolName must exist in catalog
+            - toolInput must match the schema for that tool
+            - Do not add extra fields
+            ";
 
         var raw = await _llm.CompleteAsync(system, user, temperature: 0.0);
 

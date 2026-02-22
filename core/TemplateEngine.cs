@@ -46,50 +46,77 @@ public static class TemplateEngine
 
     private static string ReplaceTokens(string s, AgentState state)
     {
-        // last raw
-        s = s.Replace("{{last}}", state.LastResultRaw)
-            .Replace("{last}", state.LastResultRaw);
+        if (string.IsNullOrEmpty(s)) return s;
 
-        // last.body (HttpTool)
-        var body = TryGetLastBody(state);
-        if (body != null)
-        {
-            s = s.Replace("{{last.body}}", body)
-                .Replace("{last.body}", body)
-                .Replace("<<body from previous step>>", body);
-        }
+        // bruto (fallback)
+        s = s.Replace("{{last}}", state.LastResultRaw ?? "")
+            .Replace("{last}", state.LastResultRaw ?? "");
 
-        // last.html (BrowserTool -> data.html)
-        var html = TryGetLastHtml(state);
-        if (html != null)
-        {
-            s = s.Replace("{{last.html}}", html)
-                .Replace("{last.html}", html)
-                .Replace("{{last.data.html}}", html)
-                .Replace("{last.data.html}", html);
-        }
+        // HTTP: { ok, status, body }
+        var body = TryGetLastRootString(state, "body");
+        if (!string.IsNullOrEmpty(body))
+            s = s.Replace("{{last.body}}", body);
+
+        // Browser: { ok, data: { action:"html", html:"..." } }
+        var html = TryGetLastDataString(state, "html");
+        if (!string.IsNullOrEmpty(html))
+            s = s.Replace("{{last.html}}", html);
+
+        // Tavily: { ok, data: { answer:"...", results:[...] } }
+        var answer = TryGetLastDataString(state, "answer");
+        if (!string.IsNullOrEmpty(answer))
+            s = s.Replace("{{last.answer}}", answer);
 
         return s;
     }
 
-  private static string? TryGetLastHtml(AgentState state)
-  {
-      if (state.LastResultJson == null) return null;
+    private static string? TryGetLastHtml(AgentState state)
+    {
+        if (state.LastResultJson == null) return null;
 
-      var root = state.LastResultJson.RootElement;
+        var root = state.LastResultJson.RootElement;
 
-      // BrowserTool retorna: {"ok":true,"data":{"action":"html","html":"..."}}
-      if (root.ValueKind == JsonValueKind.Object &&
-          root.TryGetProperty("data", out var data) &&
-          data.ValueKind == JsonValueKind.Object &&
-          data.TryGetProperty("html", out var html) &&
-          html.ValueKind == JsonValueKind.String)
-      {
-          return html.GetString();
-      }
+        // BrowserTool retorna: {"ok":true,"data":{"action":"html","html":"..."}}
+        if (root.ValueKind == JsonValueKind.Object &&
+            root.TryGetProperty("data", out var data) &&
+            data.ValueKind == JsonValueKind.Object &&
+            data.TryGetProperty("html", out var html) &&
+            html.ValueKind == JsonValueKind.String)
+        {
+            return html.GetString();
+        }
 
-      return null;
-  }
+        return null;
+    }
+
+private static string? TryGetLastRootString(AgentState state, string prop)
+{
+    if (string.IsNullOrWhiteSpace(state.LastResultRaw)) return null;
+    try
+    {
+        using var doc = JsonDocument.Parse(state.LastResultRaw);
+        if (doc.RootElement.TryGetProperty(prop, out var el) && el.ValueKind == JsonValueKind.String)
+            return el.GetString();
+    }
+    catch { }
+    return null;
+}
+
+    private static string? TryGetLastDataString(AgentState state, string prop)
+    {
+        if (string.IsNullOrWhiteSpace(state.LastResultRaw)) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(state.LastResultRaw);
+            if (doc.RootElement.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object)
+            {
+                if (data.TryGetProperty(prop, out var el) && el.ValueKind == JsonValueKind.String)
+                    return el.GetString();
+            }
+        }
+        catch { }
+        return null;
+    }
 
     private static string? TryGetLastBody(AgentState state)
     {

@@ -5,16 +5,43 @@ using AgentCore.Tools;
 
 namespace AgentCore.LLM;
 
-public sealed class OpenAiChatClient : ILLMClient
+public sealed class OpenAiCompatibleChatClient : ILLMClient
 {
     private readonly HttpClient _http;
     private readonly string _model;
+    private readonly string _chatCompletionsUrl;
 
-    public OpenAiChatClient(string apiKey, string model = "gpt-4.1")
+    public OpenAiCompatibleChatClient(
+        string baseUrl,
+        string model,
+        string? apiKey = null,
+        IReadOnlyDictionary<string, string>? defaultHeaders = null)
     {
+        if (string.IsNullOrWhiteSpace(baseUrl))
+            throw new ArgumentException("baseUrl cannot be empty.");
+
+        if (string.IsNullOrWhiteSpace(model))
+            throw new ArgumentException("model cannot be empty.");
+
         _model = model;
+        _chatCompletionsUrl = baseUrl.TrimEnd('/') + "/chat/completions";
+
         _http = new HttpClient();
-        _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+
+        if (!string.IsNullOrWhiteSpace(apiKey))
+        {
+            _http.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Bearer", apiKey);
+        }
+
+        if (defaultHeaders != null)
+        {
+            foreach (var (name, value) in defaultHeaders)
+            {
+                if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(value))
+                    _http.DefaultRequestHeaders.TryAddWithoutValidation(name, value);
+            }
+        }
     }
 
     public bool SupportsToolCalling => true;
@@ -35,7 +62,7 @@ public sealed class OpenAiChatClient : ILLMClient
         var json = JsonSerializer.Serialize(body);
         using var content = new StringContent(json, Encoding.UTF8, "application/json");
 
-        using var resp = await _http.PostAsync("https://api.openai.com/v1/chat/completions", content);
+        using var resp = await _http.PostAsync(_chatCompletionsUrl, content);
         resp.EnsureSuccessStatusCode();
 
         var respJson = await resp.Content.ReadAsStringAsync();
@@ -45,7 +72,7 @@ public sealed class OpenAiChatClient : ILLMClient
             .GetProperty("choices")[0]
             .GetProperty("message")
             .GetProperty("content")
-            .GetString() ?? "";
+            .GetString() ?? string.Empty;
     }
 
     public async Task<ToolCallingResponse> CompleteWithToolsAsync(
@@ -95,7 +122,7 @@ public sealed class OpenAiChatClient : ILLMClient
             var requestJson = JsonSerializer.Serialize(requestBody);
             using var content = new StringContent(requestJson, Encoding.UTF8, "application/json");
 
-            using var resp = await _http.PostAsync("https://api.openai.com/v1/chat/completions", content);
+            using var resp = await _http.PostAsync(_chatCompletionsUrl, content);
             resp.EnsureSuccessStatusCode();
 
             lastRawResponse = await resp.Content.ReadAsStringAsync();
